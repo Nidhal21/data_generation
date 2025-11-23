@@ -69,12 +69,29 @@ class DatasetFinalizer:
         print("STEP 4: DATASET FINALIZATION")
         print("=" * 80)
         
-        # Load raw Q&A pairs
+        # Load raw Q&A pairs (fall back to checkpoint if raw file missing)
         input_file = self.output_folder / "raw_qa_pairs.json"
         if not input_file.exists():
-            print(f"❌ File not found: {input_file}")
-            print("Run 3_qa_generator.py first!")
-            return
+            # Try to recover from checkpoint
+            checkpoint_file = self.output_folder / "qa_checkpoint.json"
+            if checkpoint_file.exists():
+                try:
+                    print(f"⚠ raw_qa_pairs.json not found. Rebuilding from {checkpoint_file}...")
+                    with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                        cp = json.load(f)
+                    qa_pairs = cp.get('qa_pairs', [])
+                    # Write a minimal raw_qa_pairs.json expected by the finalizer
+                    with open(input_file, 'w', encoding='utf-8') as out_f:
+                        json.dump({'qa_pairs': qa_pairs}, out_f, indent=2, ensure_ascii=False)
+                    print(f"✓ Rebuilt: {input_file} ({len(qa_pairs)} pairs)")
+                except Exception as e:
+                    print(f"❌ Failed to rebuild from checkpoint: {e}")
+                    print("Run 3_qa_generator.py first!")
+                    return
+            else:
+                print(f"❌ File not found: {input_file}")
+                print("Run 3_qa_generator.py first!")
+                return
         
         with open(input_file, 'r', encoding='utf-8') as f:
             data = json.load(f)

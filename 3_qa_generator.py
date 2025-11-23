@@ -29,7 +29,11 @@ class ParallelQAGenerator:
         self.model = "llama3.2"
         self.num_workers = num_workers  # Use 6 workers for 8 vCPU (leave 2 for system)
         
-        self.checkpoint_file = self.output_folder / "qa_checkpoint_parallel.json"
+        # Try to use existing checkpoint, fallback to parallel version
+        self.checkpoint_file = self.output_folder / "qa_checkpoint.json"
+        if not self.checkpoint_file.exists():
+            self.checkpoint_file = self.output_folder / "qa_checkpoint_parallel.json"
+        
         self.progress_file = self.output_folder / "progress.json"
         
         self.check_ollama()
@@ -212,8 +216,9 @@ def call_ollama(prompt: str, ollama_url: str, model: str, max_retries: int = 3) 
                     "prompt": prompt,
                     "stream": False,
                     "options": {
-                        "temperature": 0.7,
-                        "num_predict": 3500,
+                        "temperature": 0.4,
+                        "num_predict": 2000,
+
                         "top_p": 0.9,
                         "repeat_penalty": 1.2,
                         "num_ctx": 8192
@@ -251,7 +256,7 @@ def process_chunk_worker(chunk: Dict, ollama_url: str, model: str) -> Tuple[List
 TEXT:
 {chunk['text'][:2000]}
 
-TASK: Create 7 exceptional Q&A pairs about core concepts, definitions, and fundamental understanding.
+TASK: Create 3 exceptional Q&A pairs about core concepts, definitions, and fundamental understanding.
 
 QUALITY REQUIREMENTS (CRITICAL):
 - Questions must be specific and clear (20+ chars)
@@ -265,7 +270,7 @@ QUALITY REQUIREMENTS (CRITICAL):
 OUTPUT: Valid JSON array only, no markdown:
 [{{"instruction":"What is [specific concept]?","response":"Comprehensive 8-12 sentence explanation with examples...","category":"definition","difficulty":"beginner"}}]
 
-Generate exactly 7 Q&A pairs:""",
+Generate exactly 3 Q&A pairs:""",
 
             # Strategy 2: Process Mastery
             f"""You are a technical documentation expert creating actionable guides.
@@ -273,7 +278,7 @@ Generate exactly 7 Q&A pairs:""",
 TEXT:
 {chunk['text'][:2000]}
 
-TASK: Create 7 detailed Q&A pairs about processes, procedures, and implementation steps.
+TASK: Create 3 detailed Q&A pairs about processes, procedures, and implementation steps.
 
 QUALITY REQUIREMENTS (CRITICAL):
 - Questions start with "How to" or "What is the process for"
@@ -286,7 +291,7 @@ QUALITY REQUIREMENTS (CRITICAL):
 OUTPUT: Valid JSON array only:
 [{{"instruction":"How to [specific process]?","response":"Detailed 9-15 sentence process with numbered steps...","category":"process","difficulty":"intermediate"}}]
 
-Generate exactly 7 Q&A pairs:""",
+Generate exactly 3 Q&A pairs:""",
 
             # Strategy 3: Problem-Solving Excellence
             f"""You are a senior consultant helping teams solve real challenges.
@@ -294,7 +299,7 @@ Generate exactly 7 Q&A pairs:""",
 TEXT:
 {chunk['text'][:2000]}
 
-TASK: Create 6 Q&A pairs about problems, solutions, and best practices.
+TASK: Create 3 Q&A pairs about problems, solutions, and best practices.
 
 QUALITY REQUIREMENTS (CRITICAL):
 - Questions about realistic scenarios
@@ -307,7 +312,7 @@ QUALITY REQUIREMENTS (CRITICAL):
 OUTPUT: Valid JSON array only:
 [{{"instruction":"How to handle [specific challenge]?","response":"Complete 8-12 sentence solution with context and reasoning...","category":"problem-solving","difficulty":"advanced"}}]
 
-Generate exactly 6 Q&A pairs:""",
+Generate exactly 3 Q&A pairs:""",
 
             # Strategy 4: Comparative Analysis
             f"""You are an analytical expert helping learners understand relationships and differences.
@@ -315,7 +320,7 @@ Generate exactly 6 Q&A pairs:""",
 TEXT:
 {chunk['text'][:2000]}
 
-TASK: Create 5 Q&A pairs about comparisons, contrasts, and relationships.
+TASK: Create 3 Q&A pairs about comparisons, contrasts, and relationships.
 
 QUALITY REQUIREMENTS (CRITICAL):
 - Questions compare 2-3 concepts or approaches
@@ -328,7 +333,7 @@ QUALITY REQUIREMENTS (CRITICAL):
 OUTPUT: Valid JSON array only:
 [{{"instruction":"What is the difference between [A] and [B]?","response":"Thorough 7-10 sentence comparison with context...","category":"comparison","difficulty":"intermediate"}}]
 
-Generate exactly 5 Q&A pairs:"""
+Generate exactly 3 Q&A pairs:"""
         ]
         
         all_qa = []
@@ -443,8 +448,8 @@ def fix_json(text: str) -> str:
 if __name__ == "__main__":
     import sys
     
-    # Configure for your system (6 workers for 8 vCPU)
-    generator = ParallelQAGenerator("output", num_workers=6)
+    # Configure for your system (2 workers for 8 vCPU)
+    generator = ParallelQAGenerator("output", num_workers=2)
     
     resume = len(sys.argv) > 1 and sys.argv[1] == '--resume'
     
