@@ -1,6 +1,7 @@
 """
 Fine-tuning Script for Mistral 7B-Instruct
-Handles data loading, splitting, and training with W&B monitoring
+ANTI-OVERFITTING Configuration for 20K Q&A Dataset
+Optimized for stable training with proper regularization
 """
 
 import os
@@ -12,6 +13,8 @@ from unsloth import FastLanguageModel
 from trl import SFTTrainer
 from transformers import TrainingArguments, EarlyStoppingCallback
 from sklearn.model_selection import train_test_split
+from collections import Counter
+import numpy as np
 
 # ============================================================================
 # CONFIGURATION
@@ -19,51 +22,133 @@ from sklearn.model_selection import train_test_split
 
 class Config:
     # Model settings
-    MODEL_NAME = "unsloth/mistral-7b-instruct-v0.3"
+    MODEL_NAME = "unsloth/mistral-7b-v0.3"
     MAX_SEQ_LENGTH = 2048
+    DTYPE = None  # None for auto detection
     LOAD_IN_4BIT = True
     
-    # LoRA hyperparameters (optimized for 20K dataset)
-    LORA_R = 64  # Higher capacity for better learning
-    LORA_ALPHA = 128  # 2x rank
-    LORA_DROPOUT = 0.1  # Slight regularization
+    # Alternative 4-bit pre-quantized models (faster download):
+    # "unsloth/mistral-7b-bnb-4bit"
+    # "unsloth/mistral-7b-instruct-v0.2-bnb-4bit"
+    # "unsloth/mistral-7b-instruct-v0.3-bnb-4bit"
+    
+    # LoRA hyperparameters (REDUCED to prevent overfitting)
+    LORA_R = 32  # Reduced from 64 - less capacity
+    LORA_ALPHA = 64  # Reduced from 128
+    LORA_DROPOUT = 0.2  # Increased from 0.1 - more dropout
     TARGET_MODULES = ["q_proj", "k_proj", "v_proj", "o_proj", 
                       "gate_proj", "up_proj", "down_proj"]
     
-    # Training hyperparameters (optimized for 20K dataset)
-    LEARNING_RATE = 2e-4  # Higher LR safe for 20K samples
-    WARMUP_RATIO = 0.05  # 5% warmup for stability
-    NUM_EPOCHS = 3  # 3 epochs sufficient for 20K samples
-    PER_DEVICE_TRAIN_BATCH = 4  # Increased batch size
+    # Training hyperparameters (ANTI-OVERFITTING configuration)
+    LEARNING_RATE = 2e-5  # Much more conservative
+    WARMUP_RATIO = 0.1  # 10% warmup
+    NUM_EPOCHS = 2  # Reduced from 3 - prevent overfitting
+    PER_DEVICE_TRAIN_BATCH = 4
     PER_DEVICE_EVAL_BATCH = 8
     GRADIENT_ACCUMULATION_STEPS = 4  # Effective batch = 16
-    MAX_GRAD_NORM = 1.0
-    WEIGHT_DECAY = 0.01
+    MAX_GRAD_NORM = 0.5
+    WEIGHT_DECAY = 0.1  # Increased from 0.01 - stronger regularization
     LR_SCHEDULER_TYPE = "cosine"
     
-    # Early stopping settings (relaxed for 20K dataset)
-    EARLY_STOPPING_PATIENCE = 3  # 3 evaluations is enough
-    EARLY_STOPPING_THRESHOLD = 0.0005  # Smaller threshold
+    # Early stopping settings (AGGRESSIVE to prevent overfitting)
+    EARLY_STOPPING_PATIENCE = 2  # Reduced from 3 - stop faster
+    EARLY_STOPPING_THRESHOLD = 0.001  # Increased threshold
     
-    # Evaluation strategy (adjusted for dataset size)
+    # Evaluation strategy
     EVAL_STRATEGY = "steps"
-    EVAL_STEPS = 200  # More frequent evals with 20K samples
+    EVAL_STEPS = 200
     SAVE_STEPS = 200
     LOGGING_STEPS = 25
     
-    # Data split ratios (optimized for 20K samples)
-    TRAIN_RATIO = 0.90  # 18,000 for training
-    VAL_RATIO = 0.05    # 1,000 for validation
+    # Data split ratios (ANTI-OVERFITTING - larger validation set)
+    TRAIN_RATIO = 0.80  # Reduced from 0.90 - 16,000 for training
+    VAL_RATIO = 0.15    # Increased from 0.05 - 3,000 for validation
     TEST_RATIO = 0.05   # 1,000 for testing
     
     # Paths
-    FR_DATA_PATH = "final_data_fr.jsonl"
-    EN_DATA_PATH = "final_data_eng.jsonl"
+    FR_DATA_PATH = "final_data_fr_premium.jsonl"
+    EN_DATA_PATH = "final_data_eng_premium.jsonl"
     OUTPUT_DIR = "./mistral-7b-pm-expert"
     
     # W&B settings
-    WANDB_PROJECT = "mistral-7b-pm-finetuning"
-    WANDB_RUN_NAME = "mistral-7b-qlora-bilingual"
+    WANDB_PROJECT = "mistral-7b-pm-finetuning-v3"
+    WANDB_RUN_NAME = "mistral-7b-qlora-bilingual-v3"
+
+# ============================================================================
+# DATA QUALITY DIAGNOSTICS
+# ============================================================================
+
+def diagnose_data_quality(fr_path, en_path):
+    """Comprehensive data quality check"""
+    print("\n" + "="*70)
+    print("🔍 DATA QUALITY DIAGNOSTICS")
+    print("="*70)
+    
+    def analyze_file(path, lang):
+        data = []
+        lengths = []
+        user_questions = []
+        
+        with open(path, 'r', encoding='utf-8') as f:
+            for idx, line in enumerate(f):
+                try:
+                    item = json.loads(line)
+                    data.append(item)
+                    
+                    user_text = item['messages'][0]['content']
+                    assistant_text = item['messages'][1]['content']
+                    
+                    total_length = len(user_text) + len(assistant_text)
+                    lengths.append(total_length)
+                    user_questions.append(user_text.lower().strip())
+                    
+                except Exception as e:
+                    print(f"⚠️  Error on line {idx}: {e}")
+        
+        # Analysis
+        print(f"\n📊 {lang} Dataset:")
+        print(f"  Total examples: {len(data):,}")
+        print(f"  Average length: {np.mean(lengths):.0f} chars")
+        print(f"  Min length: {min(lengths)}")
+        print(f"  Max length: {max(lengths)}")
+        print(f"  Median length: {np.median(lengths):.0f} chars")
+        
+        # Check for duplicates
+        question_counts = Counter(user_questions)
+        duplicates = sum(1 for count in question_counts.values() if count > 1)
+        print(f"  Duplicate questions: {duplicates}")
+        
+        # Length distribution
+        too_short = sum(1 for l in lengths if l < 50)
+        too_long = sum(1 for l in lengths if l > 3000)
+        very_long = sum(1 for l in lengths if l > 5000)
+        
+        print(f"  Very short (<50 chars): {too_short}")
+        print(f"  Long (>3000 chars): {too_long}")
+        print(f"  Very long (>5000 chars): {very_long}")
+        
+        if very_long > 0:
+            print(f"  ⚠️  Warning: {very_long} examples may exceed MAX_SEQ_LENGTH")
+        
+        return data, lengths
+    
+    fr_data, fr_lengths = analyze_file(fr_path, "French")
+    en_data, en_lengths = analyze_file(en_path, "English")
+    
+    # Combined statistics
+    all_lengths = fr_lengths + en_lengths
+    print(f"\n📈 Combined Statistics:")
+    print(f"  Total examples: {len(fr_data) + len(en_data):,}")
+    print(f"  Average length: {np.mean(all_lengths):.0f} chars")
+    print(f"  Std deviation: {np.std(all_lengths):.0f} chars")
+    
+    # Recommend adjustments
+    max_length = max(all_lengths)
+    if max_length > 4000:
+        print(f"\n💡 Recommendation: Some examples are very long ({max_length} chars)")
+        print(f"   Consider MAX_SEQ_LENGTH adjustment or filtering")
+    
+    return fr_data, en_data
 
 # ============================================================================
 # DATA LOADING AND PREPROCESSING
@@ -98,14 +183,13 @@ def format_conversations(examples):
     return {"text": texts}
 
 def prepare_datasets(config):
-    """Load, combine, and split datasets"""
+    """Load, combine, and split datasets with quality checks"""
     print("\n" + "="*70)
     print("📚 LOADING AND PREPARING DATASETS")
     print("="*70)
     
-    # Load both datasets
-    fr_data = load_jsonl_data(config.FR_DATA_PATH)
-    en_data = load_jsonl_data(config.EN_DATA_PATH)
+    # Run diagnostics first
+    fr_data, en_data = diagnose_data_quality(config.FR_DATA_PATH, config.EN_DATA_PATH)
     
     # Add language tags for tracking
     for item in fr_data:
@@ -116,24 +200,28 @@ def prepare_datasets(config):
     # Combine datasets
     all_data = fr_data + en_data
     total_samples = len(all_data)
-    print(f"\n📊 Dataset Statistics:")
+    
+    print(f"\n📊 Dataset Summary:")
     print(f"  French examples:  {len(fr_data):,}")
     print(f"  English examples: {len(en_data):,}")
     print(f"  Total examples:   {total_samples:,}")
     
-    # Calculate approximate training time
-    steps_per_epoch = total_samples * config.TRAIN_RATIO // (config.PER_DEVICE_TRAIN_BATCH * config.GRADIENT_ACCUMULATION_STEPS)
+    # Calculate training estimates
+    steps_per_epoch = int(total_samples * config.TRAIN_RATIO / (config.PER_DEVICE_TRAIN_BATCH * config.GRADIENT_ACCUMULATION_STEPS))
     total_steps = steps_per_epoch * config.NUM_EPOCHS
+    num_evals = total_steps // config.EVAL_STEPS
+    
     print(f"\n⏱️  Training Estimation:")
     print(f"  Steps per epoch:  ~{steps_per_epoch:,}")
     print(f"  Total steps:      ~{total_steps:,}")
-    print(f"  Evaluations:      ~{total_steps // config.EVAL_STEPS}")
+    print(f"  Evaluations:      ~{num_evals}")
+    print(f"  Est. time:        ~{total_steps * 2 / 3600:.1f} hours (at 2s/step)")
     
     # Create splits
-    print(f"\n🔀 Splitting data:")
-    print(f"  Train: {config.TRAIN_RATIO*100:.0f}%")
-    print(f"  Val:   {config.VAL_RATIO*100:.0f}%")
-    print(f"  Test:  {config.TEST_RATIO*100:.0f}%")
+    print(f"\n🔀 Data Splitting:")
+    print(f"  Train: {config.TRAIN_RATIO*100:.0f}% ({int(total_samples * config.TRAIN_RATIO):,} examples)")
+    print(f"  Val:   {config.VAL_RATIO*100:.0f}% ({int(total_samples * config.VAL_RATIO):,} examples)")
+    print(f"  Test:  {config.TEST_RATIO*100:.0f}% ({int(total_samples * config.TEST_RATIO):,} examples)")
     
     # First split: separate test set
     train_val_data, test_data = train_test_split(
@@ -160,9 +248,16 @@ def prepare_datasets(config):
     # Language distribution check
     train_fr = sum(1 for x in train_data if x.get('language') == 'fr')
     train_en = sum(1 for x in train_data if x.get('language') == 'en')
-    print(f"\n🌍 Training Set Language Distribution:")
-    print(f"  French:  {train_fr:,} ({train_fr/len(train_data)*100:.1f}%)")
-    print(f"  English: {train_en:,} ({train_en/len(train_data)*100:.1f}%)")
+    val_fr = sum(1 for x in val_data if x.get('language') == 'fr')
+    val_en = sum(1 for x in val_data if x.get('language') == 'en')
+    
+    print(f"\n🌍 Language Distribution:")
+    print(f"  Training Set:")
+    print(f"    French:  {train_fr:,} ({train_fr/len(train_data)*100:.1f}%)")
+    print(f"    English: {train_en:,} ({train_en/len(train_data)*100:.1f}%)")
+    print(f"  Validation Set:")
+    print(f"    French:  {val_fr:,} ({val_fr/len(val_data)*100:.1f}%)")
+    print(f"    English: {val_en:,} ({val_en/len(val_data)*100:.1f}%)")
     
     # Convert to Hugging Face datasets
     train_dataset = Dataset.from_list(train_data)
@@ -170,6 +265,7 @@ def prepare_datasets(config):
     test_dataset = Dataset.from_list(test_data)
     
     # Format for instruction tuning
+    print("\n🔄 Formatting datasets...")
     train_dataset = train_dataset.map(
         format_conversations,
         batched=True,
@@ -189,7 +285,8 @@ def prepare_datasets(config):
     # Show sample
     print("\n🔍 Sample formatted training example:")
     print("-" * 70)
-    print(train_dataset[0]['text'][:400] + "...")
+    sample_text = train_dataset[0]['text']
+    print(sample_text[:500] + ("..." if len(sample_text) > 500 else ""))
     print("-" * 70)
     
     # Save test set for later evaluation
@@ -211,17 +308,18 @@ def setup_model_and_tokenizer(config):
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=config.MODEL_NAME,
         max_seq_length=config.MAX_SEQ_LENGTH,
-        dtype=None,
+        dtype=config.DTYPE,
         load_in_4bit=config.LOAD_IN_4BIT,
+        # token = "hf_...", # use one if using gated models
     )
     
     print("✓ Base model loaded")
     
-    # Apply LoRA
-    print("\n🔧 Applying LoRA configuration...")
-    print(f"  Rank (r):        {config.LORA_R}")
+    # Apply LoRA with anti-overfitting settings
+    print("\n🔧 Applying LoRA configuration (Anti-Overfitting)...")
+    print(f"  Rank (r):        {config.LORA_R} (reduced for regularization)")
     print(f"  Alpha:           {config.LORA_ALPHA}")
-    print(f"  Dropout:         {config.LORA_DROPOUT}")
+    print(f"  Dropout:         {config.LORA_DROPOUT} (increased to 0.2)")
     print(f"  Target modules:  {len(config.TARGET_MODULES)} modules")
     
     model = FastLanguageModel.get_peft_model(
@@ -253,9 +351,9 @@ def setup_model_and_tokenizer(config):
 # ============================================================================
 
 def train_model(config):
-    """Main training function"""
+    """Main training function with anti-overfitting measures"""
     print("\n" + "="*70)
-    print("🎯 STARTING FINE-TUNING")
+    print("🎯 STARTING FINE-TUNING (ANTI-OVERFITTING MODE)")
     print("="*70)
     
     # Initialize W&B
@@ -267,11 +365,15 @@ def train_model(config):
             "model": config.MODEL_NAME,
             "lora_r": config.LORA_R,
             "lora_alpha": config.LORA_ALPHA,
+            "lora_dropout": config.LORA_DROPOUT,
             "learning_rate": config.LEARNING_RATE,
             "epochs": config.NUM_EPOCHS,
             "batch_size": config.PER_DEVICE_TRAIN_BATCH,
             "gradient_accumulation": config.GRADIENT_ACCUMULATION_STEPS,
             "effective_batch_size": config.PER_DEVICE_TRAIN_BATCH * config.GRADIENT_ACCUMULATION_STEPS,
+            "weight_decay": config.WEIGHT_DECAY,
+            "train_ratio": config.TRAIN_RATIO,
+            "val_ratio": config.VAL_RATIO,
         }
     )
     print("✓ W&B initialized")
@@ -325,13 +427,13 @@ def train_model(config):
         dataloader_num_workers=4,
     )
     
-    # Early stopping callback
+    # Early stopping callback with aggressive settings
     early_stopping = EarlyStoppingCallback(
         early_stopping_patience=config.EARLY_STOPPING_PATIENCE,
         early_stopping_threshold=config.EARLY_STOPPING_THRESHOLD
     )
     
-    # Initialize trainer
+    # Initialize trainer with Unsloth optimizations
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -339,6 +441,7 @@ def train_model(config):
         eval_dataset=val_dataset,
         dataset_text_field="text",
         max_seq_length=config.MAX_SEQ_LENGTH,
+        dataset_num_proc=2,
         args=training_args,
         callbacks=[early_stopping],
         packing=False,
@@ -346,19 +449,36 @@ def train_model(config):
     
     # Training info
     total_steps = len(train_dataset) // (config.PER_DEVICE_TRAIN_BATCH * config.GRADIENT_ACCUMULATION_STEPS) * config.NUM_EPOCHS
-    print(f"\n📈 Training configuration:")
+    warmup_steps = int(total_steps * config.WARMUP_RATIO)
+    
+    print(f"\n📈 Training Configuration Summary:")
     print(f"  Total training steps:      {total_steps:,}")
+    print(f"  Warmup steps:              {warmup_steps:,}")
     print(f"  Evaluation every:          {config.EVAL_STEPS} steps")
     print(f"  Early stopping patience:   {config.EARLY_STOPPING_PATIENCE} evaluations")
     print(f"  Effective batch size:      {config.PER_DEVICE_TRAIN_BATCH * config.GRADIENT_ACCUMULATION_STEPS}")
     print(f"  Learning rate:             {config.LEARNING_RATE}")
-    print(f"  Warmup steps:              ~{int(total_steps * config.WARMUP_RATIO)}")
+    print(f"  Weight decay:              {config.WEIGHT_DECAY} (strong regularization)")
+    print(f"  LoRA dropout:              {config.LORA_DROPOUT}")
+    
+    print("\n🎯 Anti-Overfitting Measures Active:")
+    print("  ✓ Reduced LoRA rank (32 vs 64)")
+    print("  ✓ Increased dropout (0.2 vs 0.1)")
+    print("  ✓ Strong weight decay (0.1 vs 0.01)")
+    print("  ✓ Lower learning rate (2e-5 vs 5e-5)")
+    print("  ✓ Larger validation set (15% vs 5%)")
+    print("  ✓ Fewer epochs (2 vs 3)")
+    print("  ✓ Aggressive early stopping")
     
     # Train
     print("\n" + "="*70)
     print("🏋️  TRAINING IN PROGRESS")
     print("="*70)
     print("Monitor training at: https://wandb.ai")
+    print("\n⚠️  IMPORTANT: Watch for train/val loss gap!")
+    print("  Healthy gap: < 0.10")
+    print("  Warning gap: 0.10 - 0.20")
+    print("  Stop if gap: > 0.20")
     print()
     
     trainer.train()
@@ -370,7 +490,33 @@ def train_model(config):
     test_results = trainer.evaluate(test_dataset)
     print(f"\n✓ Test Loss: {test_results['eval_loss']:.4f}")
     
-    wandb.log({"test_loss": test_results['eval_loss']})
+    # Log to W&B
+    wandb.log({
+        "test_loss": test_results['eval_loss'],
+        "final_train_loss": trainer.state.log_history[-2]['loss'] if len(trainer.state.log_history) > 1 else 0,
+    })
+    
+    # Calculate and display overfitting metrics
+    try:
+        final_train_loss = trainer.state.log_history[-2]['loss']
+        final_val_loss = test_results['eval_loss']
+        overfitting_ratio = final_val_loss / final_train_loss if final_train_loss > 0 else 0
+        
+        print(f"\n📈 Overfitting Analysis:")
+        print(f"  Final train loss: {final_train_loss:.4f}")
+        print(f"  Final test loss:  {final_val_loss:.4f}")
+        print(f"  Loss ratio:       {overfitting_ratio:.2f}x")
+        
+        if overfitting_ratio < 1.2:
+            print(f"  Status: ✅ EXCELLENT - Minimal overfitting")
+        elif overfitting_ratio < 1.5:
+            print(f"  Status: ✅ GOOD - Acceptable generalization")
+        elif overfitting_ratio < 2.0:
+            print(f"  Status: ⚠️  FAIR - Some overfitting detected")
+        else:
+            print(f"  Status: ❌ POOR - Significant overfitting")
+    except:
+        pass
     
     # Save models
     print("\n" + "="*70)
@@ -411,6 +557,7 @@ def train_model(config):
     print(f"  - model_16bit/   (Merged model for inference)")
     print(f"  - model_gguf/    (Quantized for llama.cpp)")
     print(f"  - test_dataset/  (Test set for evaluation)")
+    print("\n🧪 Next step: Run 'python test_mistral.py' to test your model!")
 
 # ============================================================================
 # MAIN
